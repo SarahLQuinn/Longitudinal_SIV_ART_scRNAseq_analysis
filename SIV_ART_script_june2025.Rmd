@@ -1,0 +1,1911 @@
+---
+title: "SIV_ART_script"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r Install packages}
+install.packages("Seurat")
+install.packages("ggplot2")
+install.packages("patchwork")
+install.packages("parallel")
+install.packages("cowplot")
+install.packages("SeuratData")
+install.packages('ggpubr')
+install.packages('dplyr')
+install.packages("clustree")
+install.packages("devtools")
+install.packages("sctransform")
+install.packages("scCustomize")
+install.packages("DirichletReg")
+install.packages("ggsignif")
+install.packages("stringr")
+install.packages("rstatix")  
+install.packages("progress")
+install.packages("tidyr")
+install.packages("tibble")
+install.packages("pheatmap")
+install.packages('rstatix')
+install.packages('progresss')
+install.packages('reticulate')
+
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("EnhancedVolcano")
+BiocManager::install("glmGamPoi")
+BiocManager::install("viper")
+BiocManager::install("dorothea")
+
+
+
+
+# Loading in the leiden package (only if you want to cluster with the leiden algorithm)
+# Loading this package (leiden or leidenAlg) can be a bit tricky if you don't regularly use python in R. 
+# This packagerequires python on your computer and I had trouble with getting R to look at (reticulate), the right python version I had installed the algorithm onto. This python version is different for python and python3 and was different between my computer terminal and terminal in R. I ended up having to set the exact path I wanted for python in R using reticulate then restart R and it finally imported everything correctly.
+library(reticulate)
+use_python("/Users/slq5/miniconda3/bin/python", required = TRUE)
+py_config()
+install.packages("leiden")
+library('leiden')
+
+
+# Loading in RIRA package (for cell typing with rhesus macaque data)
+# this loads in the package from the Bimber lab, similar to above (leiden install) requires python configuration to be right
+# documentation on this site https://rdrr.io/github/bimberlabinternal/RIRA_classification/
+local({options(repos = BiocManager::repositories())})
+install.packages("remotes")
+remotes::install_github("bimberlabinternal/RIRA_classification")
+devtools::install_github(repo = 'bimberlabinternal/RIRA', ref = 'master', dependencies = TRUE, upgrade = 'always')
+
+library(celltypist)
+library(RIRA)
+celltypist <- import("celltypist")
+reticulate::import("celltypist")
+
+
+```
+
+```{r Load packages}
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(parallel)
+library(cowplot)
+library(leiden)
+library(dplyr)
+library(tidyr)
+library(SeuratObject)
+library(clustree)
+library(EnhancedVolcano)
+library(sctransform)
+library(gridExtra)
+library(scCustomize)
+library(ggsignif)
+library(DirichletReg)
+library(ggsignif)
+library(stringr)
+library(viper)
+library(dorothea)
+library(tibble)
+library(pheatmap)
+library(rstatix)
+library(progress)
+#library(ggpubr)
+
+```
+
+```{r Save and load in objects}
+
+# save seurat object to your computer (this is not saving the whole environment, just the object)
+# make sure the working directory is set where you want, or else write out the whole file path
+saveRDS(seurat_object, "seurat_object_date.rds")
+
+# taking a seurat object you saved and loading it back in 
+# again be sure to check working directory
+seurat_object <- readRDS("seurat_object_date.rds")
+
+# saving a table object onto your computer as a csv
+write.csv(data_table, "data_table_date.csv")
+
+# reading in a table from computer, make sure it is a csv not a xlsx or other file type
+read.csv(data_table, "data_table_date.csv")
+
+
+```
+
+```{r Import files an metadata}
+
+# -------------- METADATA IMPORT --------------
+# Read in the main metadata CSV file.
+## This is a hard-coded file path to where this document is on my computer right now, adjust accordingly (to get file path- right click on file in Finder, then hold down option to copy file path
+# Assumes the first column serves as the row names (sample names)
+# this metadata csv has a column with the file path to actual matrix data files ("expression_file_path" column). So this section will (1) load in all the data from those (2) make a seurat object (3) add the associated metadata in the table (4) combine all the samples into a single seurat object
+main_metadata <- read.csv("main_metadata.csv", row.names = 1)
+
+# Initialize a list to store Seurat objects corresponding to each sample
+seurat_list <- list()
+
+# -------------- SAMPLE PROCESSING --------------
+# Loop through each sample's metadata (each row in the metadata CSV)
+for (rowname in rownames(main_metadata)) {
+  
+  # Extract the file path for the expression data for this sample
+  expression_file_path <- main_metadata[rowname, "expression_file_path"]
+  
+  # Read in the expression matrix for this sample from the provided file path
+  # Assumes that the matrix has genes as rows, cells as columns, and the first column contains gene names
+  expression_matrix <- read.table(expression_file_path, header=TRUE, row.names=1)
+  
+  # Create a Seurat object for this sample.
+  # This object contains the expression data and initializes with the sample name as the project name
+  seurat_obj <- CreateSeuratObject(counts = expression_matrix, project = rowname)
+  
+  # Add metadata to the Seurat object:
+  # For each metadata column, the associated metadata value for this sample is replicated 
+  # across all cells in the Seurat object
+  for (colname in colnames(main_metadata)) {
+    seurat_obj <- AddMetaData(seurat_obj, metadata = rep(main_metadata[rowname, colname], ncol(seurat_obj)), col.name = colname)
+  }
+  
+  # Store the Seurat object in the list, using the sample name as the key
+  seurat_list[[rowname]] <- seurat_obj
+}
+
+# -------------- SEURAT OBJECT MERGING --------------
+# Merge all the individual Seurat objects into one combined object for further analysis
+## this is where you pick the name of the overall seurat object going forward
+combined_seurat_obj <- merge(x = seurat_list[[1]], y = seurat_list[-1])
+
+#resulting object name combined_seurat_obj here (just what I used, can change of course)
+
+
+#optional remove other objects
+#rm(expression_matrix)
+#rm(main_metadata)
+#rm(seurat_list)
+#rm(seurat_obj)
+
+# NOTE: Metadata files here are imported from a csv table attaching samples to metadata such as timepoint, animal, weeks since infection, weeks since treatment, viral load, etc
+# NOTE: the timepoint names used for labeling are acute, chronic, ARTshort (sometimes labeled ART1), ARTlong (sometimes labeled ART2), and ARTverylong (sometimes labeled as ART3)
+
+```
+
+```{r Adding more metadata after the fact}
+
+#this works for adding new metadata columns after you've combined everything into one seurat object
+# I added new columns to my metadata spreadsheet with the new info I wanted to add
+# it is important that you keep the samples names (orig.ident) consistent as that's what pairs the metadata with where it should go in the object
+
+
+# -------------- METADATA IMPORT --------------
+# Read in the main metadata CSV file.
+# Assumes the first column serves as the row names (sample names)
+main_metadata <- read.csv("main_metadata_updated.csv", row.names = 1)
+
+
+# Assuming 'combined_seurat_obj' is your existing merged Seurat object
+
+# set idents to sample name, here sample name on the spreadsheet is in the "orig.ident" column in seurat object
+Idents(combined_seurat_obj) <- "orig.ident"
+
+
+# -------------- METADATA UPDATING --------------
+# Loop through each sample's metadata (each row in the metadata CSV)
+for (rowname in rownames(main_metadata)) {
+  
+  # Identify the cells in 'combined_seurat_obj' that belong to the current sample
+  cells_of_sample <- WhichCells(combined_seurat_obj, idents = rowname)
+  
+  # Update metadata for those cells:
+  # For each metadata column, the associated metadata value for this sample is set 
+  # for the corresponding cells in the Seurat object's metadata
+  for (colname in colnames(main_metadata)) {
+    
+    # If the column doesn't exist in Seurat's metadata, create it with NA values
+    if (!colname %in% colnames(combined_seurat_obj@meta.data)) {
+      combined_seurat_obj@meta.data[, colname] <- NA
+    }
+    
+    # Now, update the values for the cells of the current sample
+    combined_seurat_obj@meta.data[cells_of_sample, colname] <- main_metadata[rowname, colname]
+  }
+}
+
+
+# potential error here: if you have done downstream processing and there is no cells for a particular sample remaining, it will error saying it can't find that ident in the object, you need to eliminate rows from the metadata table when they are no longer included in the object to avoid this
+
+```
+
+```{r Identify SIVpos cells}
+# this section is relevant if you are co-aligning with an additional genome, but could also be re-used later to add presense of certain genes as metadata
+# here I want to label any cell that had expression of at least 1 SIV transcript as SIVpos, or SIVneg otherwise
+
+# List of genes to check
+genes <- c("SIV-gag", "SIV-env", "SIV-pol", "SIV-nef", "SIV-vif", "SIV-vpr", "SIV-vpx")
+
+# Find cells that express each gene and store in a named list
+cell_map <- lapply(genes, function(gene) {
+    expression_string <- substitute(GENENAME > 0, list(GENENAME = as.name(gene)))
+    res <- do.call(WhichCells, args = c(list(object = combined_seurat_obj), list(expression = expression_string)))
+    
+    return(res)
+})
+
+# Name the list elements using gene names
+names(cell_map) <- genes
+
+# If you just want a list of unique cells that express any of the genes, do:
+SIV_cells <- unique(unlist(cell_map))
+
+
+# adds a metadata column "SIV_status" that indicates if cell had expression of an SIV transcript
+combined_seurat_obj$SIV_status <- ifelse(rownames(combined_seurat_obj@meta.data) %in% SIV_cells, "SIVpos", "SIVneg")
+
+# prints out number of SIVpos and SIVneg cells in a table
+table(combined_seurat_obj$SIV_status, combined_seurat_obj$timepoint)
+
+
+
+
+```
+
+```{r Quality control}
+####### QUALITY CONTROL ###############
+
+## Mitochondrial labeling
+# here I identify mitochondrial genes for eventual trimming (high mito genes= dying cells, I like to trim at 5%, have raised to up to 20% if overall cell quality is low (more common in tissue, not great frozen samples, etc))
+# how the mitochondrial genes are labeled depends on your genome (human, mouse, rhesus macaque) and version. Most genomes have mitochondrial genes starting with MT or mt, so you can look for the percent expression of those genes easily
+
+
+# this function adds the percentage as a metadata column (percent.mt) if they are tagged with MT (change to ^mt if your genome is lowercase)
+# combined_seurat_obj[["percent.mt"]] <- PercentageFeatureSet(combined_seurat_obj, pattern = "^MT")
+
+# some genomes (like mmul10 for rhesus macaques) do not have a common tag for mito genes, so here I am doing it as a list of mito genes (gotten from previous publications)
+# this is a very poorly written regex function, can write more efficiently for your particular list
+combined_seurat_obj[["percent.mt"]] <- PercentageFeatureSet(combined_seurat_obj, pattern = "^ND1$|^ND2$|^COX1$|^COX2$|^ATP8$|^ATP6$|^COX3$|^ND3$|^ND4L$|^ND4$|^ND5$|^ND6$|^CYTB$")
+
+# Unannotated labeling
+# make a metadata column for percent unannotated genes
+# this one is specific for rhesus macaque (ENSMMUG) you would change that exact pattern by genome
+# we don't often trim on this parameter, but can help you understand your data and the genome you are working with
+combined_seurat_obj[["percent.ens"]] <- PercentageFeatureSet(combined_seurat_obj, pattern = "^ENSMMUG")
+# look at number of unannotated genes in samples
+VlnPlot(combined_seurat_obj, features = "percent.ens", group.by = "timepoint", pt.size = 0)
+
+# Ribosomal labeling
+# make a metadata column for percent ribosomal genes
+# high ribo genes may also be indicative of low cell quality so sometimes people trim on that, but be careful, ribo genes can also be informative for function so make that decision based on your context
+combined_seurat_obj[["percent.ribo"]] <- PercentageFeatureSet(combined_seurat_obj, pattern = "^RP")
+
+
+# Sequencing Depth
+# see which samples are sequenced to depth
+# we want this graph to taper off so with more reads there are not more genes discovered (which would indicate we would need to sequence more reads to accurately represent the gene expression by cell)
+# nFeature_RNA is number of genes per cell; nCount_RNA is number of reads per cell
+FeatureScatter(combined_seurat_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "animal_timepoint")
+
+# table to see how many cells in each category
+# can do a table like this for any metadata features (change column name after $)
+table(combined_seurat_obj$animal_timepoint)
+
+#you can always run this to see the metadata columns present in your object
+combined_seurat_obj[[]]
+
+# quality control violin plots (pre-filtering)
+# visualize broken down by different parameters to get a feel for what is related to quality (e.g. does one particular sample, animal or tissue have very bad quality, etc)
+
+VlnPlot(combined_seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent. ribo"), group.by = "tissue", pt.size = 0)
+VlnPlot(combined_seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent. ribo"), group.by = "animal_timepoint", pt.size = 0)
+VlnPlot(combined_seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent. ribo"), group.by = "animal", pt.size = 0)
+VlnPlot(combined_seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent. ribo"), group.by = "timepoint", pt.size = 0)
+
+# histogram to view the distribution of genes and reads throughout your data
+hist(combined_seurat_obj$nFeature_RNA, xlab="Number of UMIs", main=paste(ncol(combined_seurat_obj), " cells, untrimmed data"),
+     breaks=100, col="grey80", ylab="Number of cells")
+hist(combined_seurat_obj $nCount_RNA, xlab="Genes detected", main= paste(ncol(combined_seurat_obj), " cells, untrimmed data"),
+     breaks=100, col="grey80", ylab="Number of cells")
+
+
+# Determining trim parameters
+# based on these violin plots and histograms you can select parameters for trimming. The goal is to keep as many cell as possible while maintaining that the cells you have are an accurate representation of the original sample biology. So we want to eliminate high mito percent which means the cell is likely dying, low features and counts which would indicate a low quality cell (dying, dead, fragmented, just ambient RNA, etc), and trim high to roughly eliminate cells that may have more than one cell per well/droplet (doublets)
+
+
+### OPTIONAL: keep an object with original data before trimming
+# keep in mind the upcoming subset function will remove the cells not meeting parameters from the data object permanently, so if you go back through to try more lose parameters you need to start from the untrimmed object
+combined_seurat_obj_untrimmed <- combined_seurat_obj
+
+# Subsetting
+# trim data for mito percent, ribo percent, number of reads and number of genes to filter out low quality cells
+combined_seurat_obj <- subset(combined_seurat_obj, subset = percent.mt < 5 | SIV_status == "SIVpos")
+combined_seurat_obj <- subset(combined_seurat_obj, subset = nFeature_RNA > 250 & nFeature_RNA < 10000 | SIV_status == "SIVpos") 
+combined_seurat_obj <- subset(combined_seurat_obj, subset = nCount_RNA > 500 & nCount_RNA < 15000 | SIV_status == "SIVpos")
+
+
+```
+
+```{r SCT integration}
+# This option is for Seurat integration with SCT
+
+# starting with original object again
+SCTint_obj <- combined_seurat_obj
+
+# split the dataset by the feature you are trying to integrate by (like batch, sequencing run, person run by)
+array.list_SCT <- SplitObject(SCTint_obj, split.by = "animal_timepoint")
+
+# normalize and identify variable features for each dataset independently
+array.list_SCT <- lapply(X = array.list_SCT, FUN = function(x) {
+    x <- SCTransform(x, vst.flavor = "v2", verbose = TRUE)})
+
+# select features that are repeatedly variable across datasets for integration
+features_SCT <- SelectIntegrationFeatures(object.list = array.list_SCT)
+
+immune.anchors_SCT <- FindIntegrationAnchors(object.list = array.list_SCT, anchor.features = features_SCT)
+
+# this command creates an 'integrated' data assay
+SCTint_obj <- IntegrateData(anchorset = immune.anchors_SCT)
+
+SCTint_obj <- ScaleData(SCTint_obj, vars.to.regress = "nCount_RNA")
+
+# Run the standard workflow for visualization and clustering
+SCTint_obj <- RunPCA(SCTint_obj, verbose = TRUE)
+ElbowPlot(SCTint_obj, ndims = 40)
+# select number of PCs to move forward with
+
+
+# this custom function determines how many PCs represent 90% of the variation in the data
+ pca_explained <- ((SCTint_obj@reductions$pca@stdev)^2/sum((SCTint_obj@reductions$pca@stdev)^2))*100
+    i=1
+    while(sum(pca_explained[1:i]) < 90){
+      i = i + 1
+    }
+    pc_use <- i
+
+pc_use
+
+# return to regular processing
+SCTint_obj <- RunUMAP(SCTint_obj, reduction = "pca", dims = 1:30)
+FeaturePlot(SCTint_obj, features = c("nCount_RNA", "nFeature_RNA"))
+#SCTint_obj_nCount <- FindNeighbors(SCTint_obj, reduction = "pca", dims = 1:30)
+#SCTint_obj_nCount <- FindClusters(SCTint_obj, resolution = 0.4)
+
+Longitudinal <- SCTint_obj
+
+```
+
+```{r Clustering}
+#CLUSTER DATA AND DETERMINE CLUSTER RESOLUTION
+# once integration strategy has been decided, we move on to clustering the data
+
+# clustering at a range of resolutions for comparison
+# alg 4 is leiden
+# we're clusting in the integrated assay, if we want to try another we can set the assay to RNA or SCT and it will be saved under "RNA_snn_res.0.2" or comparable in the metadata
+DefaultAssay(Longitudinal) <- 'integrated'
+Longitudinal <- FindNeighbors(Longitudinal, reduction = "pca", dims = 1:33)
+resolution.range <- seq(from =0.2, to = 1.2, by = 0.2)
+Longitudinal <- Seurat::FindClusters(object = Longitudinal, resolution = resolution.range, algorithm = 4, method = 'igraph')
+#Longitudinal <- FindClusters(Longitudinal, resolution = 0.05, algorithm = 4)
+
+
+# use clustree to find a resolution with minimal nodes 
+# we are looking for where the clustering becomes relatively independent of resolution
+clusterTreePlot <- clustree(Longitudinal, prefix = "integrated_snn_res.")
+clusterTreePlot
+
+#looks at UMAPs at different resolutions to see which areas the increasing clusters are in 
+feature_counts <- FeaturePlot(Longitudinal, features = "nCount_RNA", pt.size = 1, order = TRUE, max.cutoff = 5000)
+UMAP_res0.05 <- DimPlot(Longitudinal, label = TRUE, group.by = "integrated_snn_res.0.05")
+UMAP_res0.1 <- DimPlot(Longitudinal, label = TRUE, group.by = "integrated_snn_res.0.1")
+UMAP_res0.2 <- DimPlot(Longitudinal, label = TRUE, group.by = "integrated_snn_res.0.2")
+UMAP_res0.4 <- DimPlot(Longitudinal, label = TRUE, group.by = "integrated_snn_res.0.4")
+UMAP_res0.6 <- DimPlot(Longitudinal, label = TRUE, group.by = "integrated_snn_res.0.6")
+UMAP_res0.8 <- DimPlot(Longitudinal, label = TRUE, group.by = "integrated_snn_res.0.8")
+UMAP_subset <- DimPlot(Longitudinal, label = TRUE, group.by = "subcluster_updated")
+library(ggpubr)
+ggarrange(UMAP_res0.2, UMAP_res0.4,UMAP_res0.6, UMAP_res0.8)
+ggarrange(UMAP_res0.05, UMAP_res0.1,UMAP_res0.2, UMAP_res0.4)
+Longitudinal <- FindClusters(Longitudinal, resolution = 0.05, algorithm = 4)
+
+# look at violin, UMAP, bar plots, and feature plots to see how the clusters separate and are distributed by animal and timepoint
+# looking for clusters dominated by things other than cell type or maybe state (like all from one sample or time or all low quality cells)
+# if you get a cluster of cells that is dominated by really high counts (potentially doublets) or low counts/high RNA/etc (potentially low quality, dying cells, degraded RNA, ambient RNA) this may be grounds for removal of that cluster
+VlnPlot(Longitudinal, features = "nCount_RNA", group.by = "integrated_snn_res.0.2")
+DimPlot(Longitudinal, reduction = "umap", group.by = "integrated_snn_res.0.")
+DimPlot(Longitudinal, reduction = "umap", split.by = "timepoint", group.by = "RNA_snn_res.0.8")
+# this line I just use to visualize which clusters are which broad cell types to understand the structure and clustering of the data
+FeaturePlot(Longitudinal, features = c("CD3E", "CD8A", "CD19", "CD4", "CD14"))
+
+
+ggplot(Longitudinal@meta.data, aes(x=animal_timepoint , fill = integrated_snn_res.0.6)) + 
+  geom_bar(position = "fill") + 
+  labs(y= "Percent Occupancy", x = "Cluster") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+
+#either choose a resolution to work with or choose a really low resolution (maybe 0.1 or lower) that separates just the main groups (myeloid, TNK, B) and subcluster those
+# for this project I am choosing leiden 0.6 as the granular resolution moving forward
+Idents(Longitudinal) <- "integrated_snn_res.0.6"
+
+# find DE markers for each cluster to use for annotation
+markers_0.6res <- FindAllMarkers(Longitudinal, only.pos = F, min.pct = 0.25, min.diff.pct = 0.1, logfc.threshold = 0.40, test.use = "wilcox")
+markers_0.6res_top <- markers_0.6res %>% group_by(cluster) %>% top_n(20, avg_log2FC)
+write.csv(markers_0.6res_top, "Longitudinal_0.6res_markers.csv")
+
+
+# This makes a dotplot for the top genes of each cluster
+DotPlot(Longitudinal, features = Logitudinal_markers_top5$gene) + coord_flip() + RotatedAxis() + labs(caption = paste(Sys.time())) + theme(plot.caption = element_text(size = 5,hjust = 1), axis.text = element_text(size = 9), legend.title = element_text(size = 9), legend.text = element_text(size = 9),axis.title = element_blank())
+```
+
+```{r Macaque Bimber lab annotation tool}
+# this is a tool from the Bimber lab called RIRA that does automated cell type annotations for rhesus macaque data (which is great as sometimes human annotation tools can be more difficult with macaque and require determining orthologs)
+# on my data this tool worked really well for getting broad cell types (Myeloid, T and NK,  and B Cells), but more granular clustering of TNK cells was not effective (which is a common problem for automated annotation tools in my experience)
+
+# Use the built-in celltypist model to score cells according to course phenotypes (T/NK, Bcell, MoMacDC, Other)
+
+DefaultAssay(Longitudinal) <- "RNA"
+Longitudinal <- RIRA::RunCellTypist(Longitudinal, modelName = 'RIRA_Immune_v2')
+
+#plots you may want to look at with the results, it adds a metadata column called cellclass where the annotation is stored
+DimPlot(Longitudinal, group.by = "cellclass", order = TRUE)
+table(Longitudinal$cellclass, Longitudinal$SIV_status)
+table(Longitudinal$cellclass, Longitudinal$SIV_cell_quality)
+VlnPlot(Longitudinal, features = c("nCount_RNA", "nFeature_RNA"), group.by = "cellclass", pt.size = 0)
+
+#look for markers of each broad cluster to verify/confirm identities (usually main three check out, the unassigned have no upregulated genes so likely low quality RNA)
+markers_bimber_broad <- FindAllMarkers(Longitudinal, only.pos = F, min.pct = 0.5, min.diff.pct = 0.25, logfc.threshold = 0.50, test.use = "wilcox")
+
+
+
+
+# Also the built-in celltypist model for finer scope T/NK lineage
+## in my experience not that good on my data
+#Tcells <- RIRA::Classify_TNK(Tcells)
+
+#DimPlot(Tcells, group.by = "RIRA_TNK_v2.cellclass", pt.size = 3)
+
+# this one was also not great on my data
+#Longitudinal <- RIRA::Classify_ImmuneCells(Longitudinal)
+#table(Longitudinal$cellclass)
+
+```
+
+```{r Labeling cell types- new.cluster.ids}
+# this section of code is for setting the identities of your clusters as their cell type. 
+
+
+# set the idents to whatever schema you want to use for annotating 
+Idents(Longitudinal) <- "integrated_snn_res.0.6"
+
+# put in the new cluster names you want, so in this form cluster 1 will become the first name listed, etc
+#please note that this list must be the same length as the number of clusters you have because it will map 1:1 with the clusters
+# if you repeat the same name here for multiple clusters it will combine them (can use if you want to do label all T cell subsets as just "TCells" for example)
+new.cluster.ids <- c("CD14Monocytes", "AbberantBCells", "EffectorMemoryCD4TCells", "NaiveCD4TCells", "CytotoxicTCells", "NaivememoryBCells", "CD16Monocytes",  "ActivatedCD14Monocytes", "RegulatoryTCells", "NaturalKillerCells",  "Animalspecificpopulation", "DendriticCells", "TCells", "ProliferatingCells" )
+
+# set those names as levels and then idents
+names(new.cluster.ids) <- levels(Longitudinal)
+Longitudinal <- RenameIdents(Longitudinal, new.cluster.ids)
+
+# should then also shift it to a metadata category from ident
+# this now stores these labels in the metadata no matter what you change the idents too, so you can keep different names
+Longitudinal$celltypelabels <- Idents(Longitudinal)
+
+# once again you can view all metadata fields in your object using
+Longitudinal[[]]
+```
+
+
+
+```{r Figures- UMAPs, DotPlots}
+
+# UMAPS
+DimPlot(Longitudinal, group.by = "cellclass")
+DimPlot(Longitudinal, group.by = "celltypelabels")
+
+Idents(Longitudinal) <- "timepoint"
+acutechronic <- subset(Longitudinal, idents = c("acute", "chronic"))
+DimPlot(acutechronic, group.by = "timepoint")
+
+# Supplemental UMAPS
+DimPlot(Longitudinal, group.by = "animal")
+DimPlot(Longitudinal, group.by = "timepoint")
+DimPlot(Longitudinal, group.by = "animal_timepoint")
+
+
+# Dot Plots
+# This section takes granular cell type labels and assigns broad labels based on that
+# This section also creates dotplots for braod cell types with markers differentiating subsections
+
+# Create the broadcelltype column with default value NA
+Longitudinal$broadcelltype <- "other"
+
+# Assign values based on formalnames using simple ifelse statements
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Cytotoxic_TCells", "T_NK_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Naive_CD4_TCells", "T_NK_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Effector/Memory_CD4_TCells", "T_NK_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Natural_Killer_Cells", "T_NK_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Regulatory_TCells", "T_NK_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "TCells", "T_NK_Cells", 
+Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Naive/memory_BCells", "B_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Abberant_BCells", "B_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "CD14_Monocytes", "Myeloid_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Activated_CD14_Monocytes", "Myeloid_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "CD16_Monocytes", "Myeloid_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Dendritic_Cells", "Myeloid_Cells", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Proliferating_Cells", "Other", Longitudinal$broadcelltype)
+Longitudinal$broadcelltype <- ifelse(Longitudinal$formalnames == "Animal_specific_population", "Other", Longitudinal$broadcelltype)
+
+DimPlot(Longitudinal, group.by = "broadcelltype")
+#making object for each subset
+broad_object_list <- SplitObject(Longitudinal, split.by = "broadcelltype")
+
+
+# Create the DotPlot with canonical t b and myeloid markers
+Longitudinal$broadcelltype <- factor(
+  Longitudinal$broadcelltype, 
+  levels = c("B_Cells", "Myeloid_Cells", "T_NK_Cells", "Other")
+)
+
+# here is a DotPlot for major cell type lineage markers (used on overall object)
+DotPlot(Longitudinal, 
+        assay = "RNA", 
+        dot.scale = 15, 
+        features = c("MKI67", "CD28", "CD3E", 
+             "IL7R", "CD8A", "CD4", "S100A8", "THBD",
+             "CD14", "FCGR3","ITGAX", "CD19", "CD79A", "IGHM", "MS4A1"), 
+        group.by = "broadcelltype") + 
+  coord_flip() + 
+  RotatedAxis() + 
+  labs(caption = paste(Sys.time())) + 
+  theme(plot.caption = element_text(size = 5, hjust = 1), 
+        axis.text = element_text(size = 9), 
+        legend.title = element_text(size = 9), 
+        legend.text = element_text(size = 9), 
+        axis.title = element_blank())
+
+
+# This section breaks the object down by broad cell type and finds top markers for that group versus all cells
+Idents(broad_object_list[[1]]) <- "formalnames"
+bcell_markers <- FindAllMarkers(broad_object_list[[1]], only.pos = T, min.pct = 0.25, min.diff.pct = 0.1, logfc.threshold = 0.05, test.use = "wilcox")
+bcell_markers_top10 <- bcell_markers %>% group_by(cluster) %>% top_n(10, avg_log2FC)
+write.csv(bcell_markers_top10, "bcell_markers_top10.csv")
+
+Idents(broad_object_list[[2]]) <- "formalnames"
+myeloid_markers <- FindAllMarkers(broad_object_list[[2]], only.pos = T, min.pct = 0.25, min.diff.pct = 0.1, logfc.threshold = 0.05, test.use = "wilcox")
+myeloid_markers_top10 <- myeloid_markers %>% group_by(cluster) %>% top_n(10, avg_log2FC)
+write.csv(myeloid_markers_top10, "myeloid_markers_top10.csv")
+
+Idents(broad_object_list[[3]]) <- "formalnames"
+tcell_markers <- FindAllMarkers(broad_object_list[[3]], only.pos = T, min.pct = 0.20, min.diff.pct = 0.05, logfc.threshold = 0.05, test.use = "wilcox")
+tcell_markers_top10 <- tcell_markers %>% group_by(cluster) %>% top_n(10, avg_log2FC)
+write.csv(tcell_markers_top10, "tcell_markers_top10.csv")
+
+
+
+# Now making DotPlots for individual broad cell types with genes that differentiate cell type within the broad type
+broad_object_list[[2]]$formalnames <- factor(
+  broad_object_list[[2]]$formalnames, 
+  levels = c("CD16_Monocytes", "CD14_Monocytes", "Activated_CD14_Monocytes", "Dendritic_Cells")
+)
+DotPlot(broad_object_list[[2]], 
+        assay = "RNA", 
+        dot.scale = 10, 
+        features = c( "SDC2", "SLAMF9", "SULF2", "IFI27", "MX2", "APOBEC3B", "S100A8",  "THBD", "IL1B", "THBS1", "FN1", "CD14", "MS4A7", "ITGAX", "FCGR3"),
+        group.by = "formalnames") + 
+  coord_flip() + 
+  RotatedAxis() + 
+  labs(caption = paste(Sys.time())) + 
+  theme(plot.caption = element_text(size = 5, hjust = 1), 
+        axis.text = element_text(size = 9), 
+        legend.title = element_text(size = 9), 
+        legend.text = element_text(size = 9), 
+        axis.title = element_blank())
+
+
+
+broad_object_list[[3]]$formalnames <- factor(
+  broad_object_list[[3]]$formalnames, 
+  levels = c("Cytotoxic_TCells", "Natural_Killer_Cells", "Effector/Memory_CD4_TCells", "Naive_CD4_TCells", "Regulatory_TCells", "TCells")
+)
+
+DotPlot(broad_object_list[[3]], 
+        assay = "RNA", 
+        dot.scale = 15, 
+        features = c(
+          "SELL", "CCR4", "ICOS", "CD28", "MAMU-DRA", "IL7R", "CD4", "GZMA", "TYROBP", "FCGR3", "TGFBR3", "TNFRSF1B", "S100A10", "S100A4", "CD8A"),
+        group.by = "formalnames") + 
+  coord_flip() + 
+  RotatedAxis() + 
+  labs(caption = paste(Sys.time())) + 
+  theme(plot.caption = element_text(size = 5, hjust = 1), 
+        axis.text = element_text(size = 9), 
+        legend.title = element_text(size = 9), 
+        legend.text = element_text(size = 9), 
+        axis.title = element_blank())
+
+DotPlot(broad_list[[1]], assay = "RNA", dot.scale = 10, scale = TRUE, col.min = -1, col.max = 1, features = c( "GNA13", "ENSMMUG00000015563", "ZFC3H1", "rna_KLF13", "PNISR", "ARID4B", "CAPG", "MAMU-E", "MAMU-DRA", "MAMU-DRB1", "S100A10", "ITGAX", "CD19", "CD79A", "IGHM", "MS4A1")) + coord_flip() + RotatedAxis() + labs(caption = paste(Sys.time())) + theme(plot.caption = element_text(size = 5,hjust = 1), axis.text = element_text(size = 9), legend.title = element_text(size = 9), legend.text = element_text(size = 9),axis.title = element_blank())
+
+
+```
+
+```{r Figures- viral load plot}
+# Here I am creating a viral load by time plot, by animal, colored for treatment status
+# with optional inset to zoom in on untreated section 
+
+# Load necessary libraries
+library(ggplot2)
+library(tidyr)
+library(scales)   # For axis formatting
+
+# Read in the data
+viral_load_data <- read.csv("viral_load_plain.csv")
+
+# Transform the data to a long format
+viral_load_long <- pivot_longer(viral_load_data, cols = -1, names_to = "Animal_ID", values_to = "Viral_Load")
+colnames(viral_load_long)[1] <- "Weeks_Since_Infection"  # Rename for clarity
+
+# Define constants
+log_breaks <- 10^(1:ceiling(log10(max(viral_load_long$Viral_Load))))  # Log scale breaks
+log_labels <- function(x) parse(text = paste0("10^", log10(x)))       # Custom labels for 10^x format
+
+# Main plot
+main_plot <- ggplot(viral_load_long, aes(x = Weeks_Since_Infection, y = Viral_Load, color = Animal_ID, group = Animal_ID)) +
+  # Treatment phase shading
+  annotate("rect", xmin = -20, xmax = 48, ymin = 10^0.5, ymax = max(viral_load_long$Viral_Load), fill = "#f6a18f", alpha = 0.5) +  # Untreated
+  annotate("rect", xmin = 48, xmax = 350, ymin = 10^0.5, ymax = max(viral_load_long$Viral_Load), fill = "#a7e179", alpha = 0.3) +  # On ART
+  # Animal lines
+  geom_line(size = 1.2) +
+  # Limit of detection line
+  geom_hline(yintercept = 200, linetype = "dashed", color = "gray", size = 0.8) +
+  annotate("text", x = 100, y = 250, label = "Limit of Detection", color = "gray", size = 4, hjust = 0) +
+  # Axis settings
+  scale_y_log10(breaks = log_breaks, labels = log_labels, limits = c(10^0.5, max(viral_load_long$Viral_Load))) +
+  scale_x_continuous(breaks = seq(0, max(viral_load_long$Weeks_Since_Infection), by = 20), labels = scales::number_format(accuracy = 1)) +
+  # Labels and theme
+  labs(
+    title = "Viral Load Over Time by Animal",
+    x = "Weeks Since Infection",
+    y = "SIVmac251 Plasma Viral Load (copies/mL)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Centered, bold title
+    axis.title = element_text(face = "bold"),
+    axis.line = element_line(size = 1.0, color = "black"),  # Dark lines for x and y axes
+    panel.grid.major.y = element_line(color = "gray70", linetype = "dotted"),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+# Inset plot with red shading and adjusted x-axis
+inset_plot <- ggplot(viral_load_long[viral_load_long$Weeks_Since_Infection <= 65, ], 
+                     aes(x = Weeks_Since_Infection, y = Viral_Load, color = Animal_ID, group = Animal_ID)) +
+  # Untreated shading
+  annotate("rect", xmin = -5, xmax = 65, ymin = 10^0.5, ymax = max(viral_load_long$Viral_Load), fill = "#f6a18f", alpha = 0.5) +
+  # Animal lines
+  geom_line(size = 1.2) +
+  # Axis settings
+  scale_y_log10(breaks = log_breaks, labels = log_labels, limits = c(10^0.5, max(viral_load_long$Viral_Load))) +
+  scale_x_continuous(breaks = seq(-5, 65, by = 10), limits = c(-5, 65), labels = scales::number_format(accuracy = 1)) +
+  # Labels and theme
+  labs(
+    title = "Untreated Zoom In",
+    x = "Weeks Since Infection",
+    y = "SIVmac251 Plasma Viral Load (copies/mL)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.background = element_rect(fill = "white", color = "black"),  # Full white box with black border
+    plot.background = element_rect(fill = "white", color = "black"),  # Ensure background covers axes
+    axis.line = element_line(size = 1.0, color = "black"),
+    panel.grid.major.y = element_line(color = "gray70", linetype = "dotted"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Centered, bold title for inset
+    axis.title = element_text(face = "bold"),               # Bold axis labels
+    legend.position = "none"
+  )
+
+# Print the main plot
+print(main_plot)
+
+# Print the inset plot
+print(inset_plot)
+
+```
+
+```{r Figures- B cell subtyping and signature scoring }
+# this is specific to my dataset, where I identify a population of Aberrant or ABC cells and evaluate it for similarity with a population described in a previous paper
+# from "Shared transcriptional profiles of atypical B cells suggest common drivers of expansion and function in malaria, HIV, and autoimmunity" (Holla et al)
+
+object_list <- SplitObject(Longitudinal, split.by = "formalnames")
+# Create the gene list
+genes_ABC_frompaper <- c("ITGAX", "RTN4R", "IL10", "CD274", "IL21R", "CD84", "PDCD1", "SIX3", "IL12RB2",
+                         "SLAMF7", "GRN", "FAS", "PDCD1LG2", "BOC", "ARHGEF5", "TBX15", "IL10RA", 
+                         "CLEC2D", "PDGFA", "PLXNC1", "CHRNA7", "CD86", "CMTM3", "TOX2", "CD200R1", 
+                         "SEMA7A", "AICDA", "HOXA10", "XPOT", "ITGB2", "TLN1", "IRX6", "SOX5", "MYO9B",
+                         "GDI2", "E2F7", "HOXB6", "IL2RB", "AIRE", "CMTM6", "CD72", "LAMP1", "EBI3", 
+                         "HOXA3", "SATB2", "NOTCH1", "SLAMF1", "LY6E", "CD164", "POU3F3", "ITGB3", 
+                         "HOXB2", "ZNF703", "HCST", "TOX", "HEG1", "FCGR2B", "SYK", "NR4A3", "PCSK6", 
+                         "HOXA7", "ZMIZ1", "CD68", "CD19", "GOLPH3", "GCNT1", "IL18BP", "EZR", "CD151", 
+                         "LDLR", "HES1", "LY75", "MEF2D", "MS4A1", "CLPTM1", "NOTCH4", "PHF19", "BCORL1", 
+                         "TNFSF12", "NOTCH2", "GPC4", "TIGD3", "HOXB4", "ADRB1", "B4GALT1", "M6PR", 
+                         "ITGB7", "HOXA6", "ICAM1", "CD247", "PHF2", "ASCL2", "ZBTB32", "FOXP4", "CXCR3", 
+                         "TRERF1", "GPR174", "CDH13", "TBX21", "ITGAV", "CD99", "NCKAP1L", "TFEC", "TNIP1", 
+                         "ZBTB39", "CD47", "ATF3", "NFATC2", "GLI1", "CD79A", "GPR65")
+
+# Ensure the gene names are present in the dataset
+genes_ABC_frompaper <- intersect(genes_ABC_frompaper, rownames(Longitudinal))
+
+# Add the module score to the Seurat object
+Longitudinal <- AddModuleScore(object = Longitudinal, features = list(genes_ABC_frompaper), name = "ABC_frompaper")
+
+# The module score will be added to the meta.data slot with the prefix 'ABC_frompaper'
+head(Longitudinal@meta.data)
+
+# the creates a violin/boxplot for this module score between cell types
+ggplot(Longitudinal@meta.data, aes_string(x="formalnames", y="ABC_frompaper1", fill="formalnames")) +
+  geom_violin()  +
+  geom_boxplot() + 
+  guides(fill = "none")  + 
+  ggtitle("ABC Scoring from Holla, et al")
+
+
+# here are additional violin plots with DE genes between the naive/memory B cell and ABC populations
+VlnPlot(broad_object_list[[1]], features = c("S100A10", "MAMU-DRB1", "MAMU-DRA", "MAMU-E"), group.by = "formalnames")
+
+
+```
+
+```{r Figures- cell proportion bar plots}
+
+# First we need to get a table with all the cell types an percentages by animal and timepoint
+
+
+# Extract unique subclusters for plotting
+unique_subclusters <- unique(Longitudinal$formalnames)
+
+# Extract relevant metadata
+# we need to carry through any metadata we may want to separate by later
+metadata <- data.frame(
+  formalnames = Longitudinal$formalnames,
+  timepoint = Longitudinal$timepoint,
+  animal_timepoint = Longitudinal$animal_timepoint,
+  animal = Longitudinal$animal, 
+   SIV_infected = Longitudinal$SIV_infected
+)
+
+# Compute percentages
+percentage_data <- metadata %>%
+  group_by(animal_timepoint, formalnames, timepoint, animal, SIV_infected) %>%
+  summarise(cell_count = n()) %>%
+  ungroup() %>%
+  group_by(animal_timepoint) %>%
+  mutate(total_cells = sum(cell_count)) %>%
+  ungroup() %>%
+  mutate(percentage = (cell_count / total_cells) )
+
+avg_percentage_data <- percentage_data %>%
+  group_by(formalnames, timepoint) %>%
+  summarise(avg_percentage = mean(percentage))
+
+
+
+
+# Define the desired order of timepoints
+timepoint_order <- c("baseline", "acute", "chronic", "ARTshort", "ARTlong", "ARTverylong")
+
+# Function to create the plot with optional filtering
+create_plot <- function(data, selected_timepoints = NULL, selected_formalnames = NULL, formalnames_order = NULL) {
+  
+  # Ensure the timepoint column is a factor with the specified order
+  data <- data %>%
+    mutate(timepoint = factor(timepoint, levels = timepoint_order))
+  
+  # Apply filtering based on the user-specified timepoints and formalnames
+  if (!is.null(selected_timepoints)) {
+    data <- data %>% filter(timepoint %in% selected_timepoints)
+  }
+  if (!is.null(selected_formalnames)) {
+    data <- data %>% filter(formalnames %in% selected_formalnames)
+  }
+  
+  # Ensure formalnames have the specified order, if provided
+  if (!is.null(formalnames_order)) {
+    data <- data %>%
+      mutate(formalnames = factor(formalnames, levels = formalnames_order))
+  }
+  
+  # Summarize the data to calculate the mean and standard error for each formalname and timepoint
+  summary_data <- data %>%
+    group_by(formalnames, timepoint) %>%
+    summarize(
+      mean_percentage = mean(percentage, na.rm = TRUE),
+      se_percentage = sd(percentage, na.rm = TRUE) / sqrt(n()),  # Standard error
+      .groups = 'drop'
+    )
+  
+  # Get unique formalnames for alternating background shading
+  unique_formalnames <- levels(data$formalnames)
+  
+  # Define shape mapping for each animal
+  shape_mapping <- c("T530" = 4,   # X symbol
+                     "T537" = 15,  # Square
+                     "T623" = 3,   # +
+                     "T625" = 8,   # *
+                     "T627" = 18,
+                     "J400" = 1, 
+                     "GCC6" = 17,
+                     "K237" = 5)  # Diamond
+  
+  # Create the bar plot with error bars, outlined dots, and alternating background shading
+  p <- ggplot() +
+    
+    # Alternating background shading
+    annotate("rect", 
+             xmin = seq(0.5, length(unique_formalnames) - 0.5, by = 2), 
+             xmax = seq(1.5, length(unique_formalnames) + 0.5, by = 2), 
+             ymin = -Inf, ymax = Inf, fill = "grey90", alpha = 0.3) +
+    
+    # Bars: Represent the average percentage for each formalname and timepoint
+    geom_bar(data = summary_data, 
+             aes(x = formalnames, y = mean_percentage, fill = timepoint), 
+             stat = "identity", position = position_dodge(width = 0.8), 
+             color = "black", width = 0.7, alpha = 0.8) +
+    
+    # Error Bars: Represent the standard error
+    geom_errorbar(data = summary_data, 
+                  aes(x = formalnames, y = mean_percentage, 
+                      ymin = mean_percentage - se_percentage, 
+                      ymax = mean_percentage + se_percentage, 
+                      group = timepoint), 
+                  position = position_dodge(width = 0.8), 
+                  width = 0.2, color = "black") +
+
+  geom_point(data = data, 
+           aes(x = as.numeric(formalnames) + (as.numeric(timepoint) - mean(range(as.numeric(timepoint)))) * (0.8 / length(unique(timepoint))),  
+               y = percentage, fill = timepoint, shape = animal),  
+           size = 2, stroke = 0.4, alpha = 0.9, color = "black") +
+    
+
+    # Define custom shapes for each animal
+   scale_shape_manual(values = shape_mapping) +
+    
+    # Customize colors for bars and dots
+    scale_fill_manual(values = c("baseline" = "#55a868", 
+                                 "acute" = "#4c72b0", 
+                                 "chronic" = "#c44e52", 
+                                 "ARTshort" = "#8172b3", 
+                                 "ARTlong" = "#ccb974", 
+                                 "ARTverylong" = "#64b5cd")) + 
+    
+    # Add plot labels and styling
+    labs(title = "Filtered Grouped Bar Plot with Alternating Background Colors", 
+         x = "Formal Names", 
+         y = "Percentage of Cells (%)",
+         fill = "Timepoint",
+         shape = "Animal") + # Add legend for animal shapes
+    theme_minimal() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1), 
+      legend.position = "bottom"
+    )
+  
+  return(p)
+}
+
+# Example Usage
+# Filter for specific timepoints and formalnames (leave NULL for all)
+selected_timepoints <- c("ARTshort", "ARTlong","ARTverylong")  # Example subset
+selected_timepoints <- c("baseline", "acute", "chronic","ARTshort", "ARTlong","ARTverylong")  # Example subset
+
+selected_formalnames <- NULL
+#selected_timepoints <- NULL
+#formalnames_order <- c("Naive_CD4_TCells", "CD14_Monocytes")  # Specify desired order of formalnames
+formalnames_order <- c("Naive_CD4_TCells", "Effector/Memory_CD4_TCells", "Regulatory_TCells", "TCells", "Cytotoxic_TCells", "Natural_Killer_Cells", "CD14_Monocytes", "Activated_CD14_Monocytes", "CD16_Monocytes", "Dendritic_Cells", "Naive/memory_BCells", "Abberant_BCells", "Proliferating_Cells", "Animal_specific_population")  # Specify desired order of formalnames
+
+# Create and print the plot
+plot <- create_plot(percentage_data, selected_timepoints, selected_formalnames, formalnames_order)
+print(plot)
+
+
+
+########################## cell type proportion significance testing
+
+## Mann Whitney
+
+# Function to perform Mann-Whitney test for each formalname
+mann_whitney_test <- function(data, formalname_value) {
+  # Filter the data for the current formalname
+  plot_data <- subsetnamehere %>% dplyr::filter(formalnames == formalname_value)
+  
+  # Perform Mann-Whitney test
+  test_result <- wilcox.test(percentage ~ timepoint, data = plot_data)
+  
+  return(test_result)
+}
+
+# Get unique formalnames values
+unique_formalnames <- unique(subsetnamehere$formalnames)
+
+# Perform the test for each unique formalname and store the results
+test_results <- lapply(unique_formalnames, function(name) mann_whitney_test(subsetnamehere, name))
+
+# Create a named list of results
+names(test_results) <- unique_formalnames
+
+# Display the results
+test_results
+
+# Extract p-values from the test results
+p_values <- sapply(test_results, function(result) result$p.value)
+
+
+## Dirichlet Regression
+# this section uses the DirichletReg package to calculate for significance for proportions between different timepoint, there are many other tools to do this same calculation
+
+# Extract unique subclusters for plotting
+unique_subclusters <- unique(Longitudinal$formalnames)
+
+# Extract relevant metadata
+metadata <- data.frame(
+  formalnames = Longitudinal$formalnames,
+  timepoint = Longitudinal$timepoint,
+  animal_timepoint = Longitudinal$animal_timepoint,
+  animal = Longitudinal$animal, 
+   SIV_infected = Longitudinal$SIV_infected
+)
+
+# Compute percentages
+percentage_data <- metadata %>%
+  group_by(animal_timepoint, formalnames, timepoint, animal, SIV_infected) %>%
+  summarise(cell_count = n()) %>%
+  ungroup() %>%
+  group_by(animal_timepoint) %>%
+  mutate(total_cells = sum(cell_count)) %>%
+  ungroup() %>%
+  mutate(percentage = (cell_count / total_cells) )
+
+avg_percentage_data <- percentage_data %>%
+  group_by(formalnames, timepoint) %>%
+  summarise(avg_percentage = mean(percentage))
+
+time_order <- c("baseline", "acute", "chronic", "ARTshort", "ARTlong", "ARTverylong")
+
+percentage_data_short <- percentage_data[,-(4:6)]
+
+# Pivot the data to wide format
+df_wide <- percentage_data_short %>%
+  pivot_wider(names_from = formalnames, values_from = percentage)
+
+acutechronic_percents <- df_wide %>%
+  filter(timepoint %in% c('acute', 'chronic'))
+acutechronic_percents[is.na(acutechronic_percents)] <- 0
+AL <-DR_data(acutechronic_percents[,3:16])
+res <- DirichReg(AL ~as.factor(timepoint), acutechronic_percents)
+res_alt <- DirichReg(AL ~as.factor(timepoint), acutechronic_percents, model = "alternative")
+
+# View results
+summary(res)
+summary(res_alt)
+```
+
+```{r Figures- volcano plots}
+
+# volcano plots for acute v chronic DE genes by cell time
+object_list <- SplitObject(acutechronic, split.by = "cellclass")
+
+# the max.cells.per.ident here is downsampling to even out the cell counts and randomize, you can use table(seurat_obj_name$celltypenames) to see how many cells are in each cell type
+# can choose the test to use in the comparison, wilcox or DESeq2 are common, read documentation for FindMarkers to see which fits your needs best
+myeloid_timepoint_markers <- FindMarkers(object_list[[2]], ident.1 = "chronic", ident.2 = "acute", assay = "RNA", max.cells.per.ident = 1000, test.use = "DESeq2", logfc.threshold = 0.1, min.pct = 0.01)
+TCell_timepoint_markers <- FindMarkers(object_list[[5]], ident.1 = "chronic", ident.2 = "acute", assay = "RNA", max.cells.per.ident = 1000, test.use = "DESeq2")
+BCell_timepoint_markers <- FindMarkers(object_list[[4]], ident.1 = "chronic", ident.2 = "acute", assay = "RNA", max.cells.per.ident = 1000, test.use = "DESeq2")
+
+
+EnhancedVolcano(myeloid_timepoint_markers,
+    lab = rownames(myeloid_timepoint_markers),
+    title = 'Myeloid chronic V acute DE genes',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = TRUE)
+
+EnhancedVolcano(TCell_timepoint_markers,
+    lab = rownames(TCell_timepoint_markers),
+    title = 'T Cell chronic V acute DE genes',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = TRUE)
+
+EnhancedVolcano(BCell_timepoint_markers,
+    lab = rownames(BCell_timepoint_markers),
+    title = 'B Cell chronic V acute DE genes',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = TRUE)
+
+
+# volcano plots for chronic v ART1 DE genes by cell time
+chronicART1 <- subset(Longitudinal, idents = c("chronic", "ART1"))
+object_list <- SplitObject(chronicART1, split.by = "cellclass")
+
+# the max.cells.per.ident here is downsampling to even out the cell counts and randomize, you can use table(seurat_obj_name$celltypenames) to see how many cells are in each cell type
+# can choose the test to use in the comparison, wilcox or DESeq2 are common, read documentation for FindMarkers to see which fits your needs best
+myeloid_timepoint_markers <- FindMarkers(object_list[[2]], ident.1 = "ART1", ident.2 = "chronic", assay = "RNA", max.cells.per.ident = 1000, test.use = "DESeq2", logfc.threshold = 0.1, min.pct = 0.01)
+TCell_timepoint_markers <- FindMarkers(object_list[[5]], ident.1 = "ART1", ident.2 = "chronic", assay = "RNA", max.cells.per.ident = 1000, test.use = "DESeq2")
+BCell_timepoint_markers <- FindMarkers(object_list[[4]], ident.1 = "ART1", ident.2 = "chronic", assay = "RNA", max.cells.per.ident = 1000, test.use = "DESeq2")
+
+
+EnhancedVolcano(myeloid_timepoint_markers,
+    lab = rownames(myeloid_timepoint_markers),
+    title = 'Myeloid ART1 V chronic DE genes',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = TRUE)
+
+EnhancedVolcano(TCell_timepoint_markers,
+    lab = rownames(TCell_timepoint_markers),
+    title = 'T Cell ART1 V chronic DE genes',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = TRUE)
+
+EnhancedVolcano(BCell_timepoint_markers,
+    lab = rownames(BCell_timepoint_markers),
+    title = 'B Cell ART1 V chronic DE genes',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = TRUE)
+
+
+```
+
+```{r Figures- hallmark pathway spearman heatmap}
+
+# this starts with fgsea sets which pulls pathway lists from the msigdb to be loaded in as metadata module scores (one for each pathway). I used the hallmark list, could use for any other (just save list as fgsea)
+# the code for msigdb lists is in the GSEA section
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+for (gs in names(fgsea_sets)) {
+  # Clean up the pathway name to avoid problematic characters in column names
+  # (for example, replace punctuation / spaces with "_").
+  gs_clean <- gsub("[^[:alnum:]]", "_", gs)
+
+  Longitudinal <- AddModuleScore(
+    object   = Longitudinal,
+    features = list(fgsea_sets[[gs]]),  # Must be a list of vectors
+    name     = gs_clean
+  )
+
+  # By default, AddModuleScore() appends "1", "2", etc. 
+  # So you'll end up with columns like "MY_PATHWAY_1" in pseudo_Longitudinal_cellclass@meta.data.
+  # If you only pass in one gene set in the `features` list, you typically get one new column.
+  # That column name will be something like "MY_PATHWAY_1".
+  #
+  # You can rename it right away if you like:
+  new_col_name <- paste0(gs_clean)
+  old_col_name <- paste0(gs_clean, "1")  # or sometimes it's "gs_clean1"
+  
+  # rename the column in meta.data:
+  colnames(pseudo_Longitudinal_cellclass@meta.data)[
+    colnames(pseudo_Longitudinal_cellclass@meta.data) == old_col_name
+  ] <- new_col_name
+}
+
+
+
+
+# ----------------------------
+# 1. Extract metadata
+# ----------------------------
+meta_data <- chronic@meta.data
+# Make sure 'viral_load' is numeric:
+meta_data$virus_exposed <- as.numeric(as.character(meta_data$virus_exposed))
+
+# ----------------------------
+# 2. Identify the columns that contain "HALLMARK"
+# ----------------------------
+hallmark_cols <- grep("HALLMARK", colnames(meta_data), value = TRUE)
+
+# ----------------------------
+# 3. Aggregate by formalnamesCONCAT + virus exposed
+#    Compute the mean for each HALLMARK column
+# ----------------------------
+df_agg <- meta_data %>%
+  group_by(formalnamesCONCAT, virus_exposed) %>%
+  summarize(
+    across(all_of(hallmark_cols), mean, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----------------------------
+# 4. Convert from wide to long format for HALLMARK columns
+# ----------------------------
+df_long <- df_agg %>%
+  pivot_longer(
+    cols = all_of(hallmark_cols),
+    names_to = "hallmark",
+    values_to = "avg_expression"
+  )
+
+# ----------------------------
+# 5. For each (cell type, hallmark) pair, run Spearman cor vs virus_exposed
+# ----------------------------
+# We'll group_by cell type + hallmark, then apply cor.test() to each group.
+df_results <- df_long %>%
+  group_by(formalnamesCONCAT, hallmark) %>%
+  summarize(
+    cor_test = list(cor.test(virus_exposed, avg_expression, method = "spearman")),
+    .groups  = "drop"
+  ) %>%
+  mutate(
+    Spearman_R = purrr::map_dbl(cor_test, "estimate"),
+    P_value    = purrr::map_dbl(cor_test, "p.value"),
+    CellType_Hallmark = paste0(formalnamesCONCAT, "_", hallmark)
+  ) %>%
+  dplyr::select(CellType_Hallmark, Spearman_R, P_value)
+
+# ----------------------------
+# 6. Write the results to a CSV
+# ----------------------------
+write.csv(df_results, "celltype_hallmark_spearman_virusexposed_cor.csv", row.names = FALSE)
+
+```
+
+```{r Figures- GSEA }
+### general gsea functions
+#functions used for for the basic components of gsea: ranked list, pathways, and running GSEA, they are used whether you are running one set or many
+#these are mostly from Son's script or tutorial
+
+#get markers to use for ranked list
+get_sig_markers <- function(seu, group, ident1, ident2,logfc,min.pct) {
+  sig <- FindMarkers(seu, 
+                     group.by = group,
+                     ident.1 = ident1,
+                     ident.2 = ident2,
+                     only.pos = FALSE,
+                     logfc.threshold = logfc, min.pct = min.pct, min.diff.pct = -Inf, random.seed = 21)
+  return(sig)
+}
+
+
+# pathway lists from msigdbr
+m_df1 <- msigdbr(species = "Macaca mulatta", category = "H", subcategory = NA)
+m_df2 <- msigdbr(species = "Macaca mulatta", category = "C5", subcategory = "BP")
+m_df3 <- msigdbr(species = "Macaca mulatta", category = "C2", subcategory = "CP:REACTOME")
+m_df4 <- msigdbr(species = "Macaca mulatta", category = "C2", subcategory = "CP:KEGG")
+m_df5 <- msigdbr(species = "Macaca mulatta", category = "C2", subcategory = "CP:BIOCARTA")
+
+
+
+#here I am concatenating a bunch of lists of interest
+m_df <- rbind(m_df1, m_df2, m_df3, m_df4, m_df5)
+fgsea_sets <- m_df %>%
+  split(x = .$gene_symbol, f = .$gs_name)
+m_df <-m_df1
+
+
+# Get the pathways for Macaca mulatta in the C7 category
+pathways <- msigdbr(species = "Macaca mulatta", category = "C7")
+# Filter for the specific pathway by name
+specific_pathway <- pathways[pathways$gs_name == "GSE29618_BCELL_VS_MONOCYTE_DAY7_FLU_VACCINE_DN", ]
+genes_bcell_vs_monocyte <- specific_pathway$gene_symbol
+# Create a list of pathways
+pathways_list <- list(
+  GSE29618_BCELL_VS_MONOCYTE_DAY7_FLU_VACCINE_DN = genes_bcell_vs_monocyte
+)
+
+# Assuming you have a ranked gene list called `ranks`
+fgsea_results <- fgsea(pathways = pathways_list, stats = ranks)
+
+
+#actual fgsea function- needs ranked list of genes and pathway list
+gsea <- function(rankedlist,msigdb_cat,msigdb_subcat,minSize,maxSize,nperm){
+  fgseaRes <- fgseaMultilevel(fgsea_sets, stats = rankedlist, minSize = minSize, maxSize = maxSize, nperm = nperm)
+  fgseaRes <- fgseaRes %>% as_tibble() %>% arrange(desc(NES))
+  return(fgseaRes)
+}
+
+
+
+
+
+
+### my own combining functions
+# these are functions that help when running multiple cell types or timepoint comparison
+# these are functions, so shouldn't need to change anything unless project design or stats you want to use change
+
+# this iterates through a list of seurat objects and timepoint pairs and gives the GSEA results of the previously designated pathway lists (e.g. Hallmark)
+# also note that the "minSize" in the fgsea function needs to be 1 to get all the row names to show up (or else only the pathways with more than the min leading edge genes will show up and combining the tables will be harder)
+process_seurat_objects <- function(seurat_obj_list, timepoint_pairs) {
+  results_list <- list()
+
+  cat("Starting the function\n")
+  cat("Number of seurat objects:", length(seurat_obj_list), "\n")
+  cat("Timepoint pairs:", length(timepoint_pairs), "\n")
+
+  for (seurat_obj_name in names(seurat_obj_list)) {
+    cat("Processing Seurat object:", seurat_obj_name, "\n")
+    seurat_obj <- seurat_obj_list[[seurat_obj_name]]
+
+    for (pair in timepoint_pairs) {
+      cat("Processing timepoint pair:", pair[1], "and", pair[2], "\n")
+      tryCatch({
+        cat("Inside tryCatch block\n")
+        markers <- get_sig_markers(seurat_obj, "timepoint", pair[1], pair[2], logfc = 0.1, min.pct = 0.01)
+        cat("Markers obtained for", seurat_obj_name, "with", pair[1], "and", pair[2], "\n")
+
+      
+        markers_ranked <- markers %>%
+          mutate(feature = rownames(.)) %>%
+          mutate(p_val_adj = ifelse(p_val_adj == 0, .Machine$double.xmin, p_val_adj)) %>%
+          #mutate(metric = avg_log2FC) %>%
+          mutate(metric = -sign(avg_log2FC) * log10(p_val_adj)) %>%
+          arrange(desc(metric)) %>%
+          dplyr::select(feature, metric) %>%
+          deframe(.)
+        
+        fgseaRes <- fgsea(fgsea_sets, stats = markers_ranked, minSize = 15, maxSize = 5000, nPermSimple = 30000)
+        colnames(fgseaRes) <- paste(colnames(fgseaRes), seurat_obj_name, pair[1], pair[2], sep = "_")
+        
+        results_list[[paste(seurat_obj_name, pair[1], pair[2], sep = "_")]] <- fgseaRes
+      }, error = function(e) {
+        cat("Error in processing ", seurat_obj_name, " with timepoints ", pair[1], " and ", pair[2], ": ", e$message, "\n")
+      })
+    }
+  }
+
+  cat("Data processed for all combinations\n")
+  return(results_list)
+}
+
+# Function to transform each dataframe in the list
+transform_dataframes <- function(results_list) {
+  # Loop through each dataframe in the list
+  for (i in seq_along(results_list)) {
+    # Current dataframe
+    df <- results_list[[i]]
+    
+    # Assuming the structure is consistent across all dataframes in the list
+    # Extract parts from the first column name
+    parts <- strsplit(names(df)[1], "_")[[1]]
+    
+    # Add new columns for celltype, timepoint1, and timepoint2
+    df$celltype <- parts[2]
+    df$timepoint1 <- parts[3]
+    df$timepoint2 <- parts[4]
+    
+    # Shorten the column names to only include the parameter name
+    # Ensuring it doesn't affect columns that don't follow the pattern
+    names(df) <- sapply(names(df), function(x) {
+      elements <- unlist(strsplit(x, "_"))
+      if(length(elements) > 1) {
+        return(elements[1])
+      } else {
+        return(x)
+      }
+    })
+    
+    # Assign the transformed dataframe back to the list
+    results_list[[i]] <- df
+  }
+  
+  # Return the transformed list of dataframes
+  return(results_list)
+}
+
+concatenate_list_column <- function(col) {
+  if (is.list(col)) {
+    # Concatenate list elements into a single string (for character lists)
+    # For numeric lists, you might instead want to use unlist() or similar
+    return(sapply(col, function(x) paste(x, collapse = ", ")))
+  } else {
+    # Return the column unchanged if it's not a list
+    return(col)
+  }
+}
+
+
+
+### multiple object setup
+#this is used when running multiple seurat objects or timepoint comparisons at the same time
+#at the end of this need to have an object saved as seurat_obj_list and _timepoint_pairs to move on to next part
+#split or subset object
+Idents(Longitudinal) <- "timepoint"
+seurat_obj_list <- SplitObject(Longitudinal, split.by = "cellclass")
+
+
+# set the seurat objects you want to run and the timepoint pairs
+
+timepoint_pairs <- list(c("chronic", "acute"), c("ARTshort", "chronic"), c("ARTlong", "ARTshort"), c("ARTverylong", "ARTlong"))
+
+
+
+
+### running the multiple object function
+
+# this is the big one that will iterate through the list of seurat object and timepoints
+# creates an object "results" that is a list of each GSEA data table
+#TODO: go change the name of the saving file at the end
+results <- process_seurat_objects(seurat_obj_list, timepoint_pairs)
+
+# This takes the list of results objects and adds metadata columns and change changes column names so the tables can be combined
+#currently a list of tables, one for each cell type
+transformed_results <- transform_dataframes(results)
+
+# concatenates all the data tables from the list into a single list with columns category, pval, padj,ES, NES, celltype, timepoint1, etc
+combined_df <- bind_rows(transformed_results)
+
+#makes the LeadingEdge column into a character string so can be printed as a csv
+combined_df <- combined_df %>%
+  mutate(across(everything(), concatenate_list_column))
+
+
+#filter out non-significant pathways
+#combined_df <- combined_df %>%
+       # filter(padj <= 0.05)
+
+#can change order the object is in (e.g. ascending NES)
+combined_df <- combined_df %>%
+arrange(desc(padj))
+
+#save as a data table
+#TODO: change name of table to correct cell type and pathways
+write.csv(combined_df, "GSEA_chronicVacute_all_cellclass.csv")
+
+
+
+### filter, sort, and plots significant pathways
+
+filtered_Myeloid_gsea_results_ARTverylongVbasline <- Myeloid_gsea_results_ARTverylongVbasline %>%
+  filter(padj <= 0.05) %>%
+  # Arrange by NES values separately for positive and negative NES_sign
+  group_by(NES_sign) %>%
+  arrange(desc(abs(NES))) %>%
+  # Select top 5 pathways for each NES_sign group
+  slice_head(n = 5) %>%
+  ungroup()
+
+
+
+
+# Ensure pathways are ordered by NES
+filtered_Myeloid_gsea_results_ARTverylongVbasline$pathway <- factor(filtered_Myeloid_gsea_results_ARTverylongVbasline$pathway, levels = unique(filtered_Myeloid_gsea_results_ARTverylongVbasline$pathway[order(combined_df$NES)]))
+
+# Add a column for NES sign-based color
+filtered_Myeloid_gsea_results_ARTverylongVbasline$NES_sign <- ifelse(filtered_Myeloid_gsea_results_ARTverylongVbasline$NES > 0, "Positive", "Negative")
+
+# Create the plot
+ggplot(filtered_Myeloid_gsea_results_ARTverylongVbasline, aes(x = reorder(pathway, NES), y = NES, fill = NES_sign)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(y = NES / 2, # Position the stars at the midpoint of the bars
+                label = ifelse(padj <= 0.0001, "****",
+                               ifelse(padj <= 0.001, "***",
+                                      ifelse(padj <= 0.01, "**",
+                                             ifelse(padj <= 0.05, "*", ""))))),
+            color = "white", fontface = "bold", size = 5) +
+  scale_fill_manual(values = c("Positive" = "#8172b3", "Negative" = "#c44e52"), name = "NES Sign") +
+  coord_flip() + # Flip coordinates for better readability
+  theme_minimal() +
+  labs(title = "Top 5 Positive and Negative Pathways Myeloid",
+       x = "Feature Category",
+       y = "Normalized Enrichment Score (NES)") +
+  theme(legend.position = "top")
+
+
+
+```
+
+```{r Figures- cell proportion line plots}
+# here I am using the previously calculated proportions for visualization in a line plot by cell type across different time points (longitudinal study)
+
+
+
+# Create a function to generate plots for each unique formalnames value
+plot_by_formalname <- function(formalname_value) {
+  # Filter the data for the current formalname
+  plot_data <- percentage_data %>% filter(formalnames == formalname_value)
+  
+  # Generate the plot
+  p <- ggplot(plot_data, aes(x = timepoint, y = percentage, group = animal, color = animal)) +
+    geom_point() +
+    geom_line() +
+    theme_minimal() +
+    labs(title = paste("Plot for", formalname_value),
+         x = "Timepoint",
+         y = "Proportion",
+         color = "Animal") +
+    theme(legend.position = "right")  # Position the legend to the right
+  
+  # Return the plot
+  return(p)
+}
+
+# Get unique formalnames values
+unique_formalnames <- unique(Longitudinal$formalnames)
+
+# Create a list to store the plots
+plots_list <- list()
+
+# Generate and store a plot for each unique formalnames value
+for (name in unique_formalnames) {
+  plots_list[[name]] <- plot_by_formalname(name)
+}
+
+# Optionally, save the plots to files
+save_plots <- function(plots_list) {
+  for (name in names(plots_list)) {
+    file_name <- paste0("plot_", name, ".pdf")
+    ggsave(file_name, plot = plots_list[[name]], width = 8, height = 6)
+  }
+}
+
+# Call the function to save plots if needed
+ save_plots(plots_list)
+ 
+ 
+ 
+ 
+# Print all the plots by cell type together
+print_all_plots_together <- function(plots_list) {
+  do.call(grid.arrange, c(plots_list, ncol = 4))
+}
+
+# To display plots in the list
+#plots_list
+
+# To print all plots together in one panel
+print_all_plots_together(plots_list)
+ggsave("proportion_line_plots.png", plot = print_all_plots_together(plots_list), width = 15, height = 10)
+
+```
+
+```{r Figures- categorical IPDA analysis}
+
+# This separates the samples into two groups relating to their intact IPDA levels (high v low) and looks for differences in gene expression between the group (broken down by cell type)
+
+ART <- subset(Longitudinal, idents = c("ARTshort", "ARTlong", "ARTverylong"))
+ART$IPDA_intact <- as.numeric(ART$IPDA_intact)
+
+ART$ipdaHIGHLOW <- ifelse(
+  ART$IPDA_intact > 4000, "HIGH",
+  ifelse(ART$IPDA_intact > 0 & ART$IPDA_intact <= 4000, "LOW", "NONE")
+)
+table(ART$ipdaHIGHLOW)
+
+Idents(ART) <- "ipdaHIGHLOW"
+ARTipda <- subset(ART, idents = c("HIGH", "LOW"))
+table(ARTipda$ipdaHIGHLOW, ARTipda$timepoint)
+
+Idents(ARTipda) <- "ipdaHIGHLOW"
+ipdaHIGHLOWmarkers <- FindMarkers(ARTipda, ident.1 = "HIGH", ident.2 = "LOW")
+
+
+IPDA_list <- SplitObject(ARTipda, split.by = "cellclass")
+
+B_ipdaHIGHLOWmarkers <- FindMarkers(IPDA_list[[1]], ident.1 = "HIGH", ident.2 = "LOW", max.cells.per.ident = 300)
+T_ipdaHIGHLOWmarkers <- FindMarkers(IPDA_list[[2]], ident.1 = "HIGH", ident.2 = "LOW", max.cells.per.ident = 300)
+Myeloid_ipdaHIGHLOWmarkers <- FindMarkers(IPDA_list[[5]], ident.1 = "HIGH", ident.2 = "LOW", max.cells.per.ident = 300)
+
+write.csv(B_ipdaHIGHLOWmarkers, "B_ipdaHIGHLOWmarkers.csv")
+write.csv(T_ipdaHIGHLOWmarkers, "T_ipdaHIGHLOWmarkers.csv")
+write.csv(Myeloid_ipdaHIGHLOWmarkers, "Myeloid_ipdaHIGHLOWmarkers.csv")
+
+
+IPDA_B_top_genes <- B_ipdaHIGHLOWmarkers %>%
+  filter(
+    (rank(desc(avg_log2FC)) <= 50 | rank(avg_log2FC) <= 50) & p_val_adj < 0.05
+  )
+
+IPDA_T_top_genes <- T_ipdaHIGHLOWmarkers %>%
+  filter(
+    (rank(desc(avg_log2FC)) <= 50 | rank(avg_log2FC) <= 50) & p_val_adj < 0.05
+  )
+
+IPDA_Myeloid_top_genes <- Myeloid_ipdaHIGHLOWmarkers %>%
+  filter(
+    (rank(desc(avg_log2FC)) <= 50 | rank(avg_log2FC) <= 50) & p_val_adj < 0.05
+  )
+
+
+EnhancedVolcano(B_ipdaHIGHLOWmarkers,
+    lab = rownames(B_ipdaHIGHLOWmarkers),
+    title = 'Intact IPDA high vs low DE genes in B Cells',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = FALSE)
+
+EnhancedVolcano(T_ipdaHIGHLOWmarkers,
+    lab = rownames(T_ipdaHIGHLOWmarkers),
+    title = 'Intact IPDA high vs low DE genes in T and NK Cells',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = FALSE)
+
+EnhancedVolcano(Myeloid_ipdaHIGHLOWmarkers,
+    lab = rownames(Myeloid_ipdaHIGHLOWmarkers),
+    title = 'Intact IPDA high vs low DE genes in Myeloid Cells',
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = .05,
+    FCcutoff = 0.5,
+     labSize = 2, 
+    legendPosition = 'right',
+    drawConnectors = FALSE)
+
+
+ggplot(data=Myeloid_ipdaHIGHLOWmarkers, aes(x=avg_log2FC, y=-log10(p_val_adj), col=diffexpressed, label=delabel)) +
+        geom_point() + 
+        theme_minimal() +
+        geom_text_repel() +
+        scale_color_manual(values=c("blue", "black", "red")) +
+        geom_vline(xintercept=c(-0.6, 0.6), col="red") +
+        geom_hline(yintercept=-log10(0.05), col="red")
+
+```
+
+```{r Supp Figures- MMul8 ribo genes}
+# in this section I realigned all my data with the mmul8 genome so that it would have tagged mitcondrial genes
+# the goal was to identify if there was any trend or correlation between percent.mito and percent.ribo to see if ribo features we were seeing were a proxy for cell quality or were indicative of more interesting biological differences
+# therefore this section largely repeats the original opening sections with the newly aligned data and makes some additional plots regarding mitochondrial and ribosomal genes
+
+
+
+# -------------- METADATA IMPORT --------------
+# Read in the main metadata CSV file.
+## This is a hard-coded file path to where this document is on my computer right now, adjust accordingly (to get file path- right click on file in Finder, then old down option to copy file path
+# Assumes the first column serves as the row names (sample names)
+main_metadata <- read.csv("metadata_mmul8_AllTogetherNow.csv", row.names = 1)
+
+# Initialize a list to store Seurat objects corresponding to each sample
+seurat_list <- list()
+
+# -------------- SAMPLE PROCESSING --------------
+# Loop through each sample's metadata (each row in the metadata CSV)
+for (rowname in rownames(main_metadata)) {
+  
+  # Extract the file path for the expression data for this sample
+  expression_file_path <- main_metadata[rowname, "expression_file_path"]
+  
+  # Read in the expression matrix for this sample from the provided file path
+  # Assumes that the matrix has genes as rows, cells as columns, and the first column contains gene names
+  expression_matrix <- read.table(expression_file_path, header=TRUE, row.names=1)
+  
+  # Create a Seurat object for this sample.
+  # This object contains the expression data and initializes with the sample name as the project name
+  seurat_obj <- CreateSeuratObject(counts = expression_matrix, project = rowname)
+  
+  # Add metadata to the Seurat object:
+  # For each metadata column, the associated metadata value for this sample is replicated 
+  # across all cells in the Seurat object
+  for (colname in colnames(main_metadata)) {
+    seurat_obj <- AddMetaData(seurat_obj, metadata = rep(main_metadata[rowname, colname], ncol(seurat_obj)), col.name = colname)
+  }
+  
+  # Store the Seurat object in the list, using the sample name as the key
+  seurat_list[[rowname]] <- seurat_obj
+}
+
+# -------------- SEURAT OBJECT MERGING --------------
+# Merge all the individual Seurat objects into one combined object for further analysis
+## this is where you pick the name of the overall seurat object going forward
+combined_seurat_obj <- merge(x = seurat_list[[1]], y = seurat_list[-1])
+
+
+#optional remove other objeccts
+#rm(expression_matrix)
+#rm(main_metadata)
+#rm(seurat_list)
+#rm(seurat_obj)
+
+
+
+## Mitochondrial filtering
+# here I identify mitochondrial genes for eventually trimming (high mito genes= dying cells, like to trim at 5%, have raised to up to 20% if the lots of bad cells (more common in tissue, sketchy frozen samples, etc))
+# In previous references, mitochondrial gene names started with "MT-"
+  # In MMul8: MT-ATP6,MT-ATP8,MT-CO1,MT-CO2,MT-CO3,MT-ND1,MT-ND2,MT-ND3,MT-ND4,MT-ND5,MT-ND6
+  #sample.list[[i]][["percent.mt"]] <- PercentageFeatureSet(sample.list[[i]], pattern = "^MT-")
+  # In Mmul10, 13 protein coding genes:
+  # ND1,ND2,COX1,COX2,ATP8,ATP6,COX3,ND3,ND4L,ND4,ND5,ND6,CYTB
+# I feel like I overall have really low percentage of genes with mito for mmul10, idk if I don't have all the mito genes but this is a list I have seen used before and got from Vince
+
+combined_seurat_obj[["percent.mt"]] <- PercentageFeatureSet(combined_seurat_obj, pattern = "^MT-")
+
+
+#make a metadata category for the percent mitochondrial genes per cell
+#combined_seurat_obj[["percent.mt"]] <- PercentageFeatureSet(combined_seurat_obj, pattern = "^ND1$|^ND2$|^COX1$|^COX2$|^ATP8$|^ATP6$|^COX3$|^ND3$|^ND4L$|^ND4$|^ND5$|^ND6$|^CYTB$")
+
+
+# Unannotated filtering
+# make a metadata category for amount of unannotated genes
+combined_seurat_obj[["percent.ens"]] <- PercentageFeatureSet(combined_seurat_obj, pattern = "^ENSMMUG")
+# look at number of unannotated genes in samples
+VlnPlot(combined_seurat_obj, features = "percent.ens", group.by = "timepoint", pt.size = 0)
+
+# Ribosomal filtering
+# could also consider looking at percentage of ribosomal genes here and consider trimming on that (maybe ~10%?). I have done this in the past, but have seen some talks lately about certain ribo genes being an important feature in SIV data so am keeping everything there in for now.
+combined_seurat_obj[["percent.ribo"]] <- PercentageFeatureSet(combined_seurat_obj, pattern = "^RP")
+
+# Sequencing Depth
+# see which samples are sequenced to depth
+FeatureScatter(combined_seurat_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(combined_seurat_obj, feature1 = "percent.ribo", feature2 = "percent.mt", group.by = "tissue", pt.size = 0.1)
+
+
+# table to see how many cells in each category
+table(combined_seurat_obj$tissue)
+table(combined_seurat_obj$orig.ident)
+
+# quality control violin plots (pre-filtering)
+VlnPlot(combined_seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), group.by = "tissue", pt.size = 0)
+VlnPlot(combined_seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), group.by = "animal_timepoint", pt.size = 0)
+VlnPlot(combined_seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), group.by = "animal", pt.size = 0)
+VlnPlot(combined_seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), group.by = "timepoint", pt.size = 0)
+
+hist(combined_seurat_obj$nFeature_RNA, xlab="Number of UMIs", main=paste(ncol(combined_seurat_obj), " cells, untrimmed data"),
+     breaks=100, col="grey80", ylab="Number of cells")
+hist(combined_seurat_obj $nCount_RNA, xlab="Genes detected", main= paste(ncol(combined_seurat_obj), " cells, untrimmed data"),
+     breaks=100, col="grey80", ylab="Number of cells")
+hist(combined_seurat_obj $percent.mt, xlab="Genes detected", main= paste(ncol(combined_seurat_obj), " cells, untrimmed data"),
+     breaks=100, col="grey80", ylab="Number of cells")
+hist(combined_seurat_obj $percent.ribo, xlab="Percent ribosomal expression", main= paste(ncol(combined_seurat_obj), " cells"),
+     breaks=100, col="grey80", ylab="Number of cells")
+
+# Determining trim parameters
+#based on these violin plots and histograms you can select parameters for trimming. The goal is to keep as many cell as possible while maintaining that the cells you have are an accurate representation of the original sample biology. So we want to eliminate high mito percent which means the cell is likely dying, low features and counts which would indicate a low quality cell (dying, dead, fragmented, just ambient RNA, etc), and trim high to roughly eliminate cells that may have more than one cell per well/droplet (doublets)
+
+
+### OPTIONAL: keep an object with original data before trimming
+combined_seurat_obj_untrimmed <- combined_seurat_obj
+
+# Subsetting
+#trim data for mito percent, number of reads and number of genes to filter out low quality cells
+combined_seurat_obj <- subset(combined_seurat_obj, subset = percent.mt < 5)
+combined_seurat_obj <- subset(combined_seurat_obj, subset = nFeature_RNA > 250 & nFeature_RNA < 10000) 
+combined_seurat_obj <- subset(combined_seurat_obj, subset = nCount_RNA > 500 & nCount_RNA < 15000)
+
+table(combined_seurat_obj$orig.ident)
+table(combined_seurat_obj$tissue)
+
+FeatureScatter(combined_seurat_obj, feature1 = "percent.ribo", feature2 = "percent.mt", group.by = "tissue", pt.size = 0.5)
+FeatureScatter(combined_seurat_obj, feature1 = "percent.ribo", feature2 = "nCount_RNA", group.by = "tissue", pt.size = 0.5)
+FeatureScatter(combined_seurat_obj, feature1 = "percent.ribo", feature2 = "nFeature_RNA", group.by = "tissue", pt.size = 0.5)
+
+FeatureScatter(combined_seurat_obj, feature1 = "percent.mt", feature2 = "nFeature_RNA")
+
+FeatureScatter(combined_seurat_obj, feature1 = "percent.mt", feature2 = "percent.ribo", group.by = "tissue", pt.size = 0.1)
+FeatureScatter(combined_seurat_obj, feature1 = "nCount_RNA", feature2 = "percent.ribo", group.by = "tissue", pt.size = 0.1)
+FeatureScatter(combined_seurat_obj, feature1 = "nFeature_RNA", feature2 = "percent.ribo", group.by = "tissue", pt.size = 0.1)
+
+```
+
+```{r Supp Figures-  exhaustion signatures}
+# here I am evaluating some genes associated with exhaustion, looking across all cells and then subsets
+# there are many other exhaustion signatures that can be tried and looked at, you can mirror these plots with any such genes or signatures of interest
+VlnPlot(Longitudinal, features = c("PDCD1", "HAVCR2", "TOX", "PRDM1", "TIGIT", "TBX21"))
+
+# CD4s include all subsets of CD4s (effector/memory, regulatory, naive, etc)
+VlnPlot(CD4s, features = c("PDCD1", "HAVCR2", "TOX", "PRDM1", "TIGIT", "TBX21"))
+
+# CD8s are the original cyctotoxic cluster from figure 1
+VlnPlot(CD8s, features = c("PDCD1", "HAVCR2", "TOX", "PRDM1", "TIGIT", "TBX21"))
+```
+
+```{r Supp Figures- hallmark v virus exposed scatter plots}
+# Specific pairs to plot based on significance previously calculated
+pairs_to_plot <- list(
+  list(cell = "AberrantBCells", hallmark = "HALLMARK_ESTROGEN_RESPONSE_LATE1"),
+  list(cell = "ActivatedCD14Monocytes", hallmark = "HALLMARK_APOPTOSIS1"),
+  list(cell = "ActivatedCD14Monocytes", hallmark = "HALLMARK_HYPOXIA1"),
+  list(cell = "ActivatedCD14Monocytes", hallmark = "HALLMARK_KRAS_SIGNALING_UP1"),
+  list(cell = "ActivatedCD14Monocytes", hallmark = "HALLMARK_ESTROGEN_RESPONSE_EARLY1"),
+  list(cell = "ActivatedCD14Monocytes", hallmark = "HALLMARK_UV_RESPONSE_UP1"),
+  list(cell = "CD14Monocytes", hallmark = "HALLMARK_PEROXISOME1"),
+  list(cell = "CD14Monocytes", hallmark = "HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY1"),
+  list(cell = "CD16Monocytes", hallmark = "HALLMARK_UV_RESPONSE_UP1"),
+  list(cell = "CytotoxicTCells", hallmark = "HALLMARK_PI3K_AKT_MTOR_SIGNALING1"),
+  list(cell = "EffectorMemoryCD4TCells", hallmark = "HALLMARK_ESTROGEN_RESPONSE_EARLY1"),
+  list(cell = "EffectorMemoryCD4TCells", hallmark = "HALLMARK_CHOLESTEROL_HOMEOSTASIS1"),
+  list(cell = "NaivememoryBCells", hallmark = "HALLMARK_PROTEIN_SECRETION1"),
+  #list(cell = "RegulatoryTcells", hallmark = "HALLMARK_MTORC1_SIGNALING"),
+  #list(cell = "RegulatoryTcells", hallmark = "HALLMARK_PEROXISOME1"),
+  #list(cell = "RegulatoryTcells", hallmark = "HALLMARK_COMPLEMENT1"),
+  list(cell = "TCells", hallmark = "HALLMARK_HYPOXIA1"),
+  list(cell = "TCells", hallmark = "HALLMARK_KRAS_SIGNALING_UP1"),
+  list(cell = "TCells", hallmark = "HALLMARK_ESTROGEN_RESPONSE_EARLY1"),
+  list(cell = "TCells", hallmark = "HALLMARK_INTERFERON_GAMMA_RESPONSE1")
+)
+
+#cell_types <- c("EffectorMemoryCD4TCells", "NaiveBCells", "Monocytes")
+#hallmarks <- c("HALLMARK_CHOLESTEROL_HOMEOSTASIS1", "HALLMARK_INTERFERON_GAMMA_RESPONSE1", "HALLMARK_IL6_JAK_STAT3_SIGNALING1")
+
+# Generate full combination grid
+#pairs_to_plot <- expand.grid(cell = cell_types, hallmark = hallmarks, stringsAsFactors = FALSE) %>%
+#  split(seq(nrow(.)))
+
+plot_hallmark_vs_exposure <- function(cell_type, hallmark, df_agg) {
+  df2_plot <- df_agg[, c("virus_exposed", hallmark, "formalnamesCONCAT"), drop = FALSE]
+  df_filtered <- df2_plot %>%
+    filter(formalnamesCONCAT == cell_type)
+
+  if (nrow(df_filtered) < 2) {
+    warning(paste("Skipping", cell_type, hallmark, "- not enough data"))
+    return(NULL)
+  }
+
+  model_fit <- lm(virus_exposed ~ df_filtered[[hallmark]], data = df_filtered)
+  r_squared <- summary(model_fit)$r.squared
+  p_value <- summary(model_fit)$coefficients[2, 4]
+
+format_hallmark_title <- function(hallmark) {
+  if (is.null(hallmark) || is.na(hallmark)) return("UNKNOWN_HALLMARK")
+  title <- as.character(hallmark)
+  title <- gsub("^HALLMARK_", "", title)
+  title <- gsub("1$", "", title)
+  title <- gsub("_", " ", title)
+  return(title)
+}
+
+ x_range <- range(df_filtered[[hallmark]], na.rm = TRUE)
+y_range <- range(df_filtered$virus_exposed, na.rm = TRUE)
+x_ann <- x_range[2] - 0.05 * diff(x_range)
+y_ann <- y_range[2] - 0.05 * diff(y_range)
+
+  ggplot(df_filtered, aes_string(x = hallmark, y = "virus_exposed")) +
+    geom_point(color = "blue", alpha = 0.6, size = 2) +
+    geom_smooth(method = "lm", color = "red", se = FALSE) +
+    labs(
+      title = paste(cell_type, "\n", format_hallmark_title(hallmark)),
+      x = "Average Expression",
+      y = "Virus Exposed"
+    ) +
+    theme_bw(base_size = 14) +
+   theme(
+     panel.grid.major = element_line(color = "grey85", size = 0.3),  # soft major gridlines
+  panel.grid.minor = element_line(color = "grey90", size = 0.2),  # softer minor gridlines
+  panel.border = element_rect(color = "black", size = 0.5),       # black plot border
+  axis.line = element_line(color = "black"),                      # black axes
+  axis.ticks = element_line(color = "black"),                     # black tick marks
+  plot.title = element_text(hjust = 0.5, size = 18, margin = margin(b = 10)),
+  axis.title = element_text(size = 14),
+  axis.text = element_text(size = 12)
+) +
+   annotate("text",
+         x = x_ann,
+         y = y_ann,
+         label = paste0("R² = ", round(r_squared, 3),
+                        "\np = ", format.pval(p_value, digits = 3, eps = 0.001)),
+         hjust = 1, vjust = 1, size = 2, color = "black")
+}
+
+all_plots <- list()
+
+for (pair in pairs_to_plot) {
+  cell <- pair$cell
+  hallmark <- pair$hallmark
+  plot_obj <- plot_hallmark_vs_exposure(cell, hallmark, df_agg)
+  if (!is.null(plot_obj)) {
+    all_plots[[paste(cell, hallmark, sep = "_")]] <- plot_obj
+  }
+}
+
+
+# Save each plot
+for (name in names(all_plots)) {
+  ggsave(paste0("plot_", name, ".png"), all_plots[[name]], width = 6, height = 5)
+}
+
+# Or display top 4
+library(gridExtra)
+grid.arrange(grobs = head(all_plots, 20), ncol = 2)
+
+
+install.packages("patchwork")
+library(patchwork)
+combined_plot <- wrap_plots(all_plots, ncol = 4) +
+  plot_annotation(
+    title = "Virus Exposure vs Hallmark Pathway Expression",
+    theme = theme(
+      plot.title = element_text(size = 16, hjust = 0.5, face = "bold"),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+  ) &
+  theme(
+    plot.title = element_text(size = 11),
+    axis.title = element_text(size = 9),
+    axis.text = element_text(size = 7)
+  )
+
+print(combined_plot)
+ggsave("combined_patchwork_suppfigure3.pdf", combined_plot, width = 16, height = 12)
+```
+
+```{r Supp Figures- SIV cells}
+DimPlot(Longitudinal, group.by = "SIV_status", order = TRUE, cols = c("yellow", "black"), pt.size = 2)
+
+ggplot(Longitudinal@meta.data, aes(x= SIV_status , fill = formalnamesCONCAT)) + geom_bar(position = "fill", color = "black") + labs(y= "Percent Occupancy", x = "Cluster", title = "Distribution of Cells with SIV Reads")
+```
+
+```{r Virus Exposed Rough Calculation}
+# Read your data
+viral_load_data <- read.csv("viral_load.csv")
+
+# Extract time vector
+time_points <- viral_load_data$Week
+
+# Initialize result with Week column
+result <- data.frame(Week = time_points)
+
+# Define AUC function using trapezoidal rule
+cumulative_auc <- function(Week, values) {
+  aucs <- numeric(length(values))
+  aucs[1] <- 0
+  for (i in 2:length(values)) {
+    aucs[i] <- aucs[i-1] + ((values[i] + values[i-1]) / 2) * (Week[i] - Week[i-1])
+  }
+  return(aucs)
+}
+
+# Loop over each animal column
+animal_cols <- names(viral_load_data)[-1]  # All columns except 'Week'
+
+for (col_name in animal_cols) {
+  # Original viral load
+  viral_col <- paste0(col_name, "_viralload")
+  result[[viral_col]] <- viral_load_data[[col_name]]
+  
+  # Cumulative virus exposure
+  auc_col <- paste0(col_name, "_virusexposed")
+  result[[auc_col]] <- cumulative_auc(time_points, viral_load_data[[col_name]])
+}
+
+write.csv(result, "viral_exposure_calculated.csv", row.names = FALSE)
+
+
+```
+
+
+
+
+
+
